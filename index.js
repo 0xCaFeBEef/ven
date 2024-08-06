@@ -61,12 +61,15 @@ async function initializeBrowser() {
     console.log("Browser launched successfully");
 
     const pages = await browser.pages();
-    if (pages.length > 0) {
-      await pages[0].close();
-    }
+    const pagesLength = pages.length; 
     context = browser.defaultBrowserContext();
     page = await context.newPage();
     page.setDefaultNavigationTimeout(NAVIGATION_TIMEOUT);
+    
+    for (let i=0; i<pagesLength; i++) {
+      // Close the initial tab and any previous browser tabs, but only after creating a new tab
+      await pages[i].close();
+    }
 
     await ensureLoggedIn();
   } catch (error) {
@@ -205,17 +208,126 @@ async function findOrCreateChatSession(contextId = null) {
   return { chatId, page: newPage };
 }
 
-async function sendPrompt(page, prompt) {
+
+const models = {
+  default: "hermes-2-theta-web",
+  dogge: 'dogge-llama-3-70b',
+  llama3: 'llama-3.1-405b'
+}
+
+async function sendPrompt(page, { prompt, model }) {
   const textareaSelector = 'textarea[placeholder="Ask a question..."]';
   const sendButtonSelector = 'button[data-testid="chatInputSubmitButton"]';
+  const modelDropdownButtonSelector = '#menu-button-\\:rj\\:';
+  const modelListSelector = '#menu-list-\\:rj\\:';
+
+  async function checkUIState() {
+    const state = await page.evaluate((dropdownSelector, listSelector, textareaSelector, sendButtonSelector) => {
+      const dropdown = document.querySelector(dropdownSelector);
+      const list = document.querySelector(listSelector);
+      const textarea = document.querySelector(textareaSelector);
+      const sendButton = document.querySelector(sendButtonSelector);
+      return {
+        dropdownText: dropdown.textContent,
+        dropdownExpanded: dropdown.getAttribute('aria-expanded') === 'true',
+        listVisible: list && window.getComputedStyle(list).visibility !== 'hidden',
+        textareaEnabled: !textarea.disabled,
+        sendButtonEnabled: !sendButton.disabled
+      };
+    }, modelDropdownButtonSelector, modelListSelector, textareaSelector, sendButtonSelector);
+    console.log("[DEBUG] Current UI State:", JSON.stringify(state, null, 2));
+    return state;
+  }
+
 
   try {
+     /**
+     * 
+     * 
+     * 
+     * 
+     */
+
+    // SELECT MODEL
+    if (!Object.values(models).includes(model)) {
+      throw new Error(`Invalid model: ${model}. Must be one of ${Object.values(models).join(', ')}`);
+    }
+
+    console.log("[DEBUG] Checking current model and selecting if necessary:", model);
+    // await checkUIState();
+
+    // Check if the current model is already the desired one without opening the dropdown
+    const isModelSelected = await page.evaluate((buttonSelector, modelValue) => {
+      function modelMatches(buttonText, modelValue) {
+        const buttonLower = buttonText.toLowerCase();
+        const modelLower = modelValue.toLowerCase();
+        return buttonLower.includes(modelLower.replace(/-/g, ' '));
+      }
+      const button = document.querySelector(buttonSelector);
+      return modelMatches(button.textContent, modelValue);
+    }, modelDropdownButtonSelector, model);
+
+    if (!isModelSelected) {
+      console.log("[DEBUG] Need to change the model");
+
+      // Click the dropdown button to open the menu
+      await page.click(modelDropdownButtonSelector);
+      console.log("[DEBUG] Clicked model dropdown button to open");
+      // await checkUIState();
+
+      // Wait for the dropdown to become visible
+      await page.waitForSelector(modelListSelector, { visible: true, timeout: 5000 });
+      console.log("[DEBUG] Dropdown menu is now visible");
+      // await checkUIState();
+
+      // Click the desired model option using the button's value attribute
+      const modelOptionSelector = `${modelListSelector} button[value="${model}"]`;
+      await page.waitForSelector(modelOptionSelector, { visible: true, timeout: 5000 });
+      await page.click(modelOptionSelector);
+      console.log(`[DEBUG] Clicked on model option: ${model}`);
+      // await checkUIState();
+
+      // Wait for the dropdown to close
+      await page.waitForFunction((listSelector) => {
+        const list = document.querySelector(listSelector);
+        return !list || window.getComputedStyle(list).visibility === 'hidden';
+      }, { timeout: 5000 }, modelListSelector);
+      console.log("[DEBUG] Dropdown menu is now closed");
+      // await checkUIState();
+
+      // Verify that the correct model is selected
+      const finalModelCheck = await page.evaluate((buttonSelector, modelValue) => {
+        function modelMatches(buttonText, modelValue) {
+          const buttonLower = buttonText.toLowerCase();
+          const modelLower = modelValue.toLowerCase();
+          return buttonLower.includes(modelLower.replace(/-/g, ' '));
+        }
+        const button = document.querySelector(buttonSelector);
+        return modelMatches(button.textContent, modelValue);
+      }, modelDropdownButtonSelector, model);
+
+      if (!finalModelCheck) {
+        console.error(`Failed to select the correct model: ${model}`);
+      }
+      console.log("[DEBUG] Model selection confirmed");
+    } else {
+      console.log("[DEBUG] Desired model is already selected");
+    }
+    // END SELECT MODEL
+    /**
+     * 
+     * 
+     * 
+     * 
+     */
+
     console.log("[DEBUG] Waiting for textarea");
     await page.waitForSelector(textareaSelector, {
       timeout: NAVIGATION_TIMEOUT,
       visible: true,
     });
     console.log("[DEBUG] Textarea found");
+    // await checkUIState();
 
     console.log("[DEBUG] Focusing on textarea");
     await page.focus(textareaSelector);
@@ -226,13 +338,8 @@ async function sendPrompt(page, prompt) {
     }, textareaSelector);
 
     console.log("[DEBUG] Typing prompt into textarea");
-    const lines = prompt.split("\n");
-    for (let i = 0; i < lines.length; i++) {
-      await page.keyboard.type(lines[i]);
-      if (i < lines.length - 1) {
-        await page.keyboard.press("Enter");
-      }
-    }
+    await page.type(textareaSelector, prompt);
+    // await checkUIState();
 
     console.log("[DEBUG] Verifying entered text");
     const enteredText = await page.$eval(textareaSelector, (el) => el.value);
@@ -260,8 +367,10 @@ async function sendPrompt(page, prompt) {
       timeout: NAVIGATION_TIMEOUT,
       visible: true,
     });
+    // await checkUIState();
 
     await page.click(sendButtonSelector);
+    console.log("[DEBUG] Clicked send button");
     await responsePromise;
 
     console.log("[DEBUG] Waiting for assistant response in UI");
@@ -339,8 +448,10 @@ function cleanupOngoingRequests() {
   }
 }
 
+
+
 app.post("/chat", async (req, res) => {
-  const { prompt, contextId, withRefs = false } = req.body;
+  const { prompt, contextId, withRefs = false, model = 'default' } = req.body;
 
   if (!prompt) {
     return res.status(400).send("No prompt provided");
@@ -375,7 +486,7 @@ app.post("/chat", async (req, res) => {
     const requestPromise = new Promise((resolve, reject) => {
       try {
         console.log("[DEBUG] Calling sendPrompt");
-        resolve(sendPrompt(page, prompt));
+        resolve(sendPrompt(page, { prompt, model: models[model] }));
         console.log("[DEBUG] sendPrompt completed");
       } catch (error) {
         reject(error);

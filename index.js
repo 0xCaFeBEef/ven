@@ -222,9 +222,9 @@ async function sendPrompt(page, { prompt, model }) {
   const modelListSelector = '#menu-list-\\:rj\\:';
 
   async function checkUIState() {
-    const state = await page.evaluate((dropdownSelector, listSelector, textareaSelector, sendButtonSelector) => {
-      const dropdown = document.querySelector(dropdownSelector);
-      const list = document.querySelector(listSelector);
+    const state = await page.evaluate((modelDropdownButtonSelector, modelListSelector, textareaSelector, sendButtonSelector) => {
+      const dropdown = document.querySelector(modelDropdownButtonSelector);
+      const list = document.querySelector(modelListSelector);
       const textarea = document.querySelector(textareaSelector);
       const sendButton = document.querySelector(sendButtonSelector);
       return {
